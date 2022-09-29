@@ -1,9 +1,9 @@
 // A TcpListener that can be shut down
 
 use std::{
+    io::{self, Write},
     net::{self, ToSocketAddrs},
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
-    io::{self, Write}
+    sync::{Arc, atomic::{AtomicBool, Ordering}}
 };
 
 

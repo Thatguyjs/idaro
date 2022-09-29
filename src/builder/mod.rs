@@ -30,7 +30,8 @@ pub fn build(from: PathBuf, to: PathBuf) -> io::Result<BuildStats> {
     for action in actions {
         match action {
             Action::Copy(path) => {
-                let to = to.join(&path);
+                let stripped_path = path.strip_prefix(&from).unwrap().to_path_buf();
+                let to = to.join(&stripped_path);
 
                 if let Err(e) = fs::create_dir_all(to.parent().unwrap()) {
                     eprintln!("Error creating output directory: {}", e);
