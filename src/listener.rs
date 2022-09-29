@@ -1,112 +1,71 @@
-// A simple TCP listener which can be shut down
-
-use socket2::{Socket, Domain, Type};
+// A TcpListener that can be shut down
 
 use std::{
-    io,
-    net::{SocketAddr, Shutdown, TcpStream},
-    thread::{self, JoinHandle},
-    sync::{Arc, mpsc::{self, Receiver, Sender}, Mutex}
+    net::{self, ToSocketAddrs},
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    io::{self, Write}
 };
 
 
-enum Event {
-    Stream(io::Result<TcpStream>),
-    Shutdown
-}
-
-
 pub struct TcpListener {
-    // addr: SocketAddr,
-    socket: Arc<Socket>,
-    listen_handle: Option<JoinHandle<()>>,
-
-    send: Arc<Mutex<Sender<Event>>>,
-    recv: Receiver<Event>
+    listener: net::TcpListener,
+    should_close: Arc<AtomicBool>
 }
 
 impl TcpListener {
-    pub fn bind(addr: SocketAddr) -> io::Result<(Self, TcpShutdown)> {
-        let sk = Socket::new(Domain::IPV4, Type::STREAM, None)?;
-        sk.set_reuse_address(true)?;
-        sk.bind(&addr.into())?;
-        let sk = Arc::new(sk);
+    pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<(Self, TcpShutdown)> {
+        let listener = net::TcpListener::bind(&addr)?;
 
-        let (send, recv) = mpsc::channel();
+        let listener_close = Arc::new(AtomicBool::new(false));
+        let shutdown_close = listener_close.clone();
 
         Ok((
             TcpListener {
-                // addr,
-                socket: sk.clone(),
-                listen_handle: None,
-
-                send: Arc::new(Mutex::new(send)),
-                recv
+                listener,
+                should_close: listener_close
             },
-            TcpShutdown(sk.clone())
+            TcpShutdown::new(addr, shutdown_close)?
         ))
     }
 
-    pub fn listen(&mut self) -> io::Result<()> {
-        self.socket.listen(32)?;
-
-        let thread_send = self.send.clone();
-        let thread_sk = self.socket.clone();
-
-        self.listen_handle = Some(thread::spawn(move || {
-            loop {
-                match thread_sk.accept() {
-                    Ok((sk, _)) => {
-                        thread_send.lock().unwrap().send(Event::Stream(Ok(TcpStream::from(sk)))).unwrap();
-                    },
-                    Err(e) => {
-                        if e.kind() == io::ErrorKind::InvalidInput {
-                            thread_send.lock().unwrap().send(Event::Shutdown).unwrap();
-                            break;
-                        }
-
-                        thread_send.lock().unwrap().send(Event::Stream(Err(e))).unwrap();
-                    }
-                }
-            }
-        }));
-
-        Ok(())
-    }
-
     pub fn incoming(&self) -> TcpIncoming {
-        TcpIncoming(&self.recv)
-    }
-
-    pub fn wait(&mut self) {
-        match self.listen_handle.take() {
-            Some(handle) => {
-                handle.join().unwrap();
-            },
-            None => ()
-        }
+        TcpIncoming(self)
     }
 }
 
 
-pub struct TcpIncoming<'a>(&'a Receiver<Event>);
+pub struct TcpIncoming<'a>(&'a TcpListener);
 
 impl<'a> Iterator for TcpIncoming<'a> {
-    type Item = io::Result<TcpStream>;
+    type Item = io::Result<net::TcpStream>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.0.recv().unwrap() {
-            Event::Stream(stream) => Some(stream),
-            Event::Shutdown => None
+        let sk = self.0.listener.accept().map(|(sk, _)| sk);
+
+        match self.0.should_close.load(Ordering::Relaxed) {
+            true => None,
+            false => Some(sk)
         }
     }
 }
 
 
-pub struct TcpShutdown(Arc<Socket>);
+pub struct TcpShutdown {
+    address: net::SocketAddr,
+    should_close: Arc<AtomicBool>
+}
 
 impl TcpShutdown {
-    pub fn shutdown(&self) -> io::Result<()> {
-        self.0.shutdown(Shutdown::Both)
+    pub fn new<A: ToSocketAddrs>(addr: A, should_close: Arc<AtomicBool>) -> io::Result<Self> {
+        let address = addr.to_socket_addrs()?.next().expect("Expected a socket address for TcpShutdown");
+        Ok(TcpShutdown { address, should_close })
+    }
+
+    pub fn shutdown(&mut self) -> io::Result<()> {
+        self.should_close.store(true, Ordering::SeqCst);
+        let mut s = net::TcpStream::connect(self.address)?;
+        s.write(b"GET / HTTP/1.1\r\n\r\n")?;
+
+        Ok(())
     }
 }

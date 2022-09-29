@@ -5,48 +5,50 @@ pub use options::WebOptions;
 
 use crate::{
     listener::{TcpListener, TcpShutdown},
-    parser
+    parser,
+    threadpool::Threadpool
 };
 
 use std::{
     io::{self, Write},
     fs,
     net::{SocketAddr, TcpStream},
-    path::PathBuf
+    path::PathBuf, sync::Arc
 };
 
 
 pub struct WebServer {
     options: WebOptions,
-    listener: TcpListener
+    listener: TcpListener,
+    threadpool: Threadpool
 }
 
 impl WebServer {
     pub fn new<A: Into<SocketAddr>>(addr: A, options: WebOptions) -> io::Result<(Self, TcpShutdown)> {
         let (listener, shutdown) = TcpListener::bind(addr.into())?;
+        let threadpool = Threadpool::new(options.threads);
 
         Ok((
-            WebServer { listener, options },
+            WebServer { listener, options, threadpool },
             shutdown
         ))
     }
 
-    pub fn listen(&mut self) -> io::Result<()> {
-        self.listener.listen()
-    }
+    pub fn handle_connections(self) {
+        let host_path = Arc::new(self.options.host_path);
 
-    pub fn handle_connections(&mut self) {
         for stream in self.listener.incoming() {
-            if let Err(e) = self.handle_stream(stream.unwrap()) {
-                println!("Stream Parse Error: {}", e);
-            }
-        }
+            let thread_host_path = host_path.clone();
 
-        // Just in case the thread hasn't finished
-        self.listener.wait();
+            self.threadpool.execute(move || {
+                if let Err(e) = Self::handle_stream(thread_host_path, stream.unwrap()) {
+                    eprintln!("Stream Parse Error: {}", e);
+                }
+            });
+        }
     }
 
-    fn handle_stream(&self, mut stream: TcpStream) -> io::Result<()> {
+    fn handle_stream(host_path: Arc<PathBuf>, mut stream: TcpStream) -> io::Result<()> {
         let req = http::Request::parse(&mut stream)?;
         let mut res = http::Response::new(&stream);
 
@@ -65,14 +67,16 @@ impl WebServer {
             _ => ()
         }
 
-        let req_path = self.options.host_path.join(&req_path);
+        let req_path = host_path.join(&req_path);
 
         match fs::read(&req_path) {
             Ok(data) => {
                 let output: Vec<u8>;
 
                 if is_markdown { // Parse the document
-                    let data = std::str::from_utf8(&data).expect("Invalid character in document");
+                    let data = std::str::from_utf8(&data).map_err(|err|
+                        io::Error::new(io::ErrorKind::Other, err)
+                    )?;
                     output = parser::parse(data).into_bytes();
                 }
                 else { // No parsing
@@ -93,7 +97,7 @@ impl WebServer {
                     res.write(b"404 Not Found")?;
                 }
                 else {
-                    eprintln!("Error serving file ({:?}): {}", &req_path, e);
+                    eprintln!("Error serving file ({}): {}", &req_path.display(), e);
 
                     res.set_status(500).write_header("Content-Type", "text/plain");
                     res.write(b"500 Internal Server Error")?;
