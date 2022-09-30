@@ -32,7 +32,10 @@ fn main() {
         Some(("run", args)) => {
             let addr = args.value_of("addr").unwrap().parse::<SocketAddr>().unwrap();
 
-            let (web_server, mut shutdown) = WebServer::new(addr.clone(), WebOptions::default()).unwrap();
+            let mut options = WebOptions::default();
+            options.host_path = args.value_of("path").unwrap().into();
+
+            let (web_server, mut shutdown) = WebServer::new(addr.clone(), options).unwrap();
             println!("WebServer listening at {}", &addr);
 
             ctrlc::set_handler(move || {
